@@ -15,55 +15,37 @@
 // ═══ Deno KV Storage ═══
 const kv = await Deno.openKv();
 
+// ✅ 替换为这个版本（动态列表，最可靠）
 async function kvListEmails(): Promise<string[]> {
-  try {
-    const res = await kv.get<string[]>(["a", "list"]);
-    return res.value ?? [];
-  } catch { return []; }
+  const emails: string[] = [];
+  for await (const entry of kv.list({ prefix: ["a", "d"] })) {
+    if (entry.key.length === 3) {
+      emails.push(entry.key[2] as string);
+    }
+  }
+  return emails;
 }
 
-async function kvGetAcc(email: string): Promise<Record<string, unknown> | null> {
-  try {
-    const res = await kv.get<Record<string, unknown>>(["a", "d", email]);
-    return res.value ?? null;
-  } catch { return null; }
-}
-
+// ✅ 简化保存（不需要再维护 list）
 async function kvSaveAcc(data: Record<string, unknown>) {
   const email = data.email as string;
+  if (!email) return;
   await kv.set(["a", "d", email], data);
-  const list = await kvListEmails();
-  if (!list.includes(email)) {
-    list.push(email);
-    await kv.set(["a", "list"], list);
-  }
 }
 
+// ✅ 删除只需删 key
 async function kvDelAcc(email: string) {
   await kv.delete(["a", "d", email]);
-  const list = (await kvListEmails()).filter(e => e !== email);
-  await kv.set(["a", "list"], list);
 }
 
-async function kvIncrStat(key: string) {
-  try {
-    const res = await kv.get<number>(["stats", key]);
-    await kv.set(["stats", key], (res.value ?? 0) + 1);
-  } catch { /**/ }
-}
-
-async function kvGetStat(key: string): Promise<number> {
-  const res = await kv.get<number>(["stats", key]);
-  return res.value ?? 0;
-}
-
-async function kvGetCF(): Promise<{ cfClearance: string; sessionToken: string } | null> {
-  const res = await kv.get<{ cfClearance: string; sessionToken: string }>(["cf", "config"]);
-  return res.value ?? null;
-}
-
-async function kvSetCF(cfg: { cfClearance: string; sessionToken: string }) {
-  await kv.set(["cf", "config"], cfg);
+// ✅ Wipe 也改成删 prefix（更彻底）
+async function handleApiWipe(): Promise<Response> {
+  let deleted = 0;
+  for await (const entry of kv.list({ prefix: ["a", "d"] })) {
+    await kv.delete(entry.key);
+    deleted++;
+  }
+  return jsonResp({ ok: true, deleted });
 }
 
 // ═══ Helpers ═══
