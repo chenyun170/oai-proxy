@@ -14,7 +14,7 @@
 // ═══ Deno KV Storage ═══
 const kv = await Deno.openKv();
 
-// ✅ 动态列表（最可靠，彻底解决列表变0）
+// ✅ 动态列表（最可靠，永远不会再丢失）
 async function kvListEmails(): Promise<string[]> {
   const emails: string[] = [];
   for await (const entry of kv.list({ prefix: ["a", "d"] })) {
@@ -63,7 +63,7 @@ async function kvSetCF(cfg: { cfClearance: string; sessionToken: string }) {
   await kv.set(["cf", "config"], cfg);
 }
 
-// ✅ Wipe 也更新（动态删除，防止残留）
+// ✅ Wipe 也更新（动态删除，防止残留数据）
 async function handleApiWipe(): Promise<Response> {
   let deleted = 0;
   for await (const entry of kv.list({ prefix: ["a", "d"] })) {
@@ -71,29 +71,6 @@ async function handleApiWipe(): Promise<Response> {
     deleted++;
   }
   return jsonResp({ ok: true, deleted });
-}
-
-// ═══ Helpers ═══
-function jsonResp(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Cache-Control": "no-store",
-    },
-  });
-}
-
-function corsResp(): Response {
-  return new Response(null, {
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type,Authorization",
-      "Access-Control-Max-Age": "86400",
-    },
-  });
 }
 
 // ═══ Auth ═══
