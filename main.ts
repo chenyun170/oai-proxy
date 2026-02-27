@@ -14,7 +14,7 @@
 // ═══ Deno KV Storage ═══
 const kv = await Deno.openKv();
 
-// ✅ 动态列表 - 最可靠，永远不会再丢失
+// ✅ 动态列表（最可靠，永远不会再丢失）
 async function kvListEmails(): Promise<string[]> {
   const emails: string[] = [];
   for await (const entry of kv.list({ prefix: ["a", "d"] })) {
