@@ -14,7 +14,7 @@
 // ═══ Deno KV Storage ═══
 const kv = await Deno.openKv();
 
-// ✅ 动态列表（最可靠，永远不会再丢失）
+// ✅ 动态列表（最可靠，彻底解决列表变0）
 async function kvListEmails(): Promise<string[]> {
   const emails: string[] = [];
   for await (const entry of kv.list({ prefix: ["a", "d"] })) {
@@ -63,7 +63,7 @@ async function kvSetCF(cfg: { cfClearance: string; sessionToken: string }) {
   await kv.set(["cf", "config"], cfg);
 }
 
-// ✅ Wipe 也更新（动态删除，防止残留数据）
+// ✅ Wipe 也更新
 async function handleApiWipe(): Promise<Response> {
   let deleted = 0;
   for await (const entry of kv.list({ prefix: ["a", "d"] })) {
