@@ -4,6 +4,7 @@
  * 
  * 环境变量:
  *   ADMIN_PASSWORD   管理员密码 (默认 admin123)
+ *   KV_PATH          SQLite 数据库路径 (Deno Deploy 用 Deno KV，本地用文件路径)
  * 
  * Deno Deploy 部署:
  *   1. 上传本文件到 GitHub
@@ -14,15 +15,11 @@
 // ═══ Deno KV Storage ═══
 const kv = await Deno.openKv();
 
-// ✅ 动态列表（彻底解决列表变0）
 async function kvListEmails(): Promise<string[]> {
-  const emails: string[] = [];
-  for await (const entry of kv.list({ prefix: ["a", "d"] })) {
-    if (entry.key.length === 3) {
-      emails.push(entry.key[2] as string);
-    }
-  }
-  return emails;
+  try {
+    const res = await kv.get<string[]>(["a", "list"]);
+    return res.value ?? [];
+  } catch { return []; }
 }
 
 async function kvGetAcc(email: string): Promise<Record<string, unknown> | null> {
@@ -34,12 +31,18 @@ async function kvGetAcc(email: string): Promise<Record<string, unknown> | null> 
 
 async function kvSaveAcc(data: Record<string, unknown>) {
   const email = data.email as string;
-  if (!email) return;
   await kv.set(["a", "d", email], data);
+  const list = await kvListEmails();
+  if (!list.includes(email)) {
+    list.push(email);
+    await kv.set(["a", "list"], list);
+  }
 }
 
 async function kvDelAcc(email: string) {
   await kv.delete(["a", "d", email]);
+  const list = (await kvListEmails()).filter(e => e !== email);
+  await kv.set(["a", "list"], list);
 }
 
 async function kvIncrStat(key: string) {
@@ -63,24 +66,27 @@ async function kvSetCF(cfg: { cfClearance: string; sessionToken: string }) {
   await kv.set(["cf", "config"], cfg);
 }
 
-// ✅ Wipe 更新
-async function handleApiWipe(): Promise<Response> {
-  let deleted = 0;
-  for await (const entry of kv.list({ prefix: ["a", "d"] })) {
-    await kv.delete(entry.key);
-    deleted++;
-  }
-  return jsonResp({ ok: true, deleted });
+// ═══ Helpers ═══
+function jsonResp(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
-// ✅ Wipe 也更新
-async function handleApiWipe(): Promise<Response> {
-  let deleted = 0;
-  for await (const entry of kv.list({ prefix: ["a", "d"] })) {
-    await kv.delete(entry.key);
-    deleted++;
-  }
-  return jsonResp({ ok: true, deleted });
+function corsResp(): Response {
+  return new Response(null, {
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type,Authorization",
+      "Access-Control-Max-Age": "86400",
+    },
+  });
 }
 
 // ═══ Auth ═══
@@ -214,8 +220,7 @@ function transformSSEStream(body: ReadableStream, model: string): ReadableStream
         const { done, value } = await reader.read();
         if (done) break;
         buf += dec.decode(value, { stream: true });
-        const lines = buf.split("
-"); buf = lines.pop() ?? "";
+        const lines = buf.split("\n"); buf = lines.pop() ?? "";
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const raw = line.slice(6).trim();
@@ -234,14 +239,10 @@ function transformSSEStream(body: ReadableStream, model: string): ReadableStream
             id, object: "chat.completion.chunk", created, model,
             choices: [{ index: 0, delta: delta ? { content: delta } : {}, finish_reason: stop ? "stop" : null }],
           });
-          await writer.write(enc.encode("data: " + chunk + "
-
-"));
+          await writer.write(enc.encode("data: " + chunk + "\n\n"));
         }
       }
-      await writer.write(enc.encode("data: [DONE]
-
-"));
+      await writer.write(enc.encode("data: [DONE]\n\n"));
     } catch { /**/ } finally { writer.close().catch(() => {}); }
   })();
 
@@ -414,12 +415,10 @@ async function handleApiDelete(req: Request): Promise<Response> {
 }
 
 async function handleApiWipe(): Promise<Response> {
-  let deleted = 0;
-  for await (const entry of kv.list({ prefix: ["a", "d"] })) {
-    await kv.delete(entry.key);
-    deleted++;
-  }
-  return jsonResp({ ok: true, deleted });
+  const list = await kvListEmails();
+  for (const email of list) await kv.delete(["a", "d", email]);
+  await kv.set(["a", "list"], []);
+  return jsonResp({ ok: true, deleted: list.length });
 }
 
 async function handleApiProbe(req: Request): Promise<Response> {
@@ -464,8 +463,7 @@ async function handleApiProbe(req: Request): Promise<Response> {
     ok: !!cfClearance,
     status: cfClearance ? 200 : 0,
     body: cfClearance
-      ? `cf-clearance: ${cfClearance.slice(0, 30)}... (${cfClearance.length}chars)
-session-token: ${sessionToken ? sessionToken.slice(0, 20) + "... (" + sessionToken.length + "chars)" : "NOT SET"}`
+      ? `cf-clearance: ${cfClearance.slice(0, 30)}... (${cfClearance.length}chars)\nsession-token: ${sessionToken ? sessionToken.slice(0, 20) + "... (" + sessionToken.length + "chars)" : "NOT SET"}`
       : "NO cf-clearance. Call POST /admin/api/setcf",
   });
 
@@ -549,9 +547,7 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ error: "Not found" }, 404);
   }
 
-  return new Response("OpenAI Proxy OK
-Admin: /admin
-Proxy: /v1/", {
+  return new Response("OpenAI Proxy OK\nAdmin: /admin\nProxy: /v1/", {
     headers: { "Content-Type": "text/plain" },
   });
 });
@@ -899,10 +895,7 @@ function buildPanelJS(): string {
 
   lines.push('function importOne(){var text=document.getElementById("pone").value.trim();if(!text)return setAl("ial","awk","请粘贴 JSON");var json;try{json=JSON.parse(text);}catch(e){return setAl("ial","aer","格式错误: "+e.message);}fetch("/admin/api/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(json)}).then(function(r){return r.json();}).then(function(d){if(d.ok){lg("✓ "+d.email,"ok");setAl("ial","aok","导入成功: "+d.email);}else{setAl("ial","aer",d.error||"失败");}loadStats();}).catch(function(e){setAl("ial","aer",e.message);});}');
 
-  lines.push('function fillApi(){var base=location.origin+"/v1";document.getElementById("abase").textContent=base;document.getElementById("pyc").textContent="from openai import OpenAI\
-client = OpenAI(base_url=\\""+base+"\\", api_key=\\"sk-any\\")\
-resp = client.chat.completions.create(model=\\"gpt-4o\\", messages=[{\\"role\\":\\"user\\",\\"content\\":\\"Hi!\\"}])\
-print(resp.choices[0].message.content)";on("cp-base","click",function(){cp(base);});on("cp-pyc","click",function(){cp(document.getElementById("pyc").textContent);});}');
+  lines.push('function fillApi(){var base=location.origin+"/v1";document.getElementById("abase").textContent=base;document.getElementById("pyc").textContent="from openai import OpenAI\\nclient = OpenAI(base_url=\\""+base+"\\", api_key=\\"sk-any\\")\\nresp = client.chat.completions.create(model=\\"gpt-4o\\", messages=[{\\"role\\":\\"user\\",\\"content\\":\\"Hi!\\"}])\\nprint(resp.choices[0].message.content)";on("cp-base","click",function(){cp(base);});on("cp-pyc","click",function(){cp(document.getElementById("pyc").textContent);});}');
 
   lines.push('on("btn-logout","click",function(){fetch("/admin/logout",{method:"POST"}).then(function(){location.reload();});});');
   lines.push('on("btn-refresh","click",loadStats);');
@@ -918,6 +911,5 @@ print(resp.choices[0].message.content)";on("cp-base","click",function(){cp(base)
   lines.push('loadStats();');
   lines.push('})();');
   lines.push('<\/script>');
-  return lines.join('
-');
+  return lines.join('\n');
 }
