@@ -31,15 +31,41 @@ async function kvGetAcc(email: string): Promise<Record<string, unknown> | null> 
 
 async function kvSaveAcc(data: Record<string, unknown>) {
   const email = data.email as string;
-  await kv.set(["a", "d", email], data);
-  const list = await kvListEmails();
-  if (!list.includes(email)) {
-    list.push(email);
-    await kv.set(["a", "list"], list);
+  // 用 atomic 保证 list + data 原子写入，防止并发时丢数据
+  for (let retry = 0; retry < 5; retry++) {
+    const listRes = await kv.get<string[]>(["a", "list"]);
+    const list = listRes.value ?? [];
+    const newList = list.includes(email) ? list : [...list, email];
+    const result = await kv.atomic()
+      .check(listRes)                          // 乐观锁：若 list 被并发修改则重试
+      .set(["a", "d", email], data)
+      .set(["a", "list"], newList)
+      .commit();
+    if (result.ok) return;
+    // 乐观锁失败，稍等重试
+    await new Promise(r => setTimeout(r, 20 * (retry + 1)));
   }
+  // 最后兜底：强制写入（放弃 check）
+  const list = await kvListEmails();
+  const newList = list.includes(email) ? list : [...list, email];
+  await kv.set(["a", "d", email], data);
+  await kv.set(["a", "list"], newList);
 }
 
 async function kvDelAcc(email: string) {
+  for (let retry = 0; retry < 5; retry++) {
+    const listRes = await kv.get<string[]>(["a", "list"]);
+    const list = listRes.value ?? [];
+    const newList = list.filter(e => e !== email);
+    const result = await kv.atomic()
+      .check(listRes)
+      .delete(["a", "d", email])
+      .set(["a", "list"], newList)
+      .commit();
+    if (result.ok) return;
+    await new Promise(r => setTimeout(r, 20 * (retry + 1)));
+  }
+  // 兜底
   await kv.delete(["a", "d", email]);
   const list = (await kvListEmails()).filter(e => e !== email);
   await kv.set(["a", "list"], list);
@@ -47,8 +73,14 @@ async function kvDelAcc(email: string) {
 
 async function kvIncrStat(key: string) {
   try {
-    const res = await kv.get<number>(["stats", key]);
-    await kv.set(["stats", key], (res.value ?? 0) + 1);
+    for (let retry = 0; retry < 3; retry++) {
+      const res = await kv.get<number>(["stats", key]);
+      const result = await kv.atomic()
+        .check(res)
+        .set(["stats", key], (res.value ?? 0) + 1)
+        .commit();
+      if (result.ok) return;
+    }
   } catch { /**/ }
 }
 
@@ -394,11 +426,15 @@ async function handleApiBatch(req: Request): Promise<Response> {
   const files = body.files ?? [];
   let success = 0, failed = 0;
   const errors: unknown[] = [];
+  // 串行写入，避免并发导致 list 互相覆盖
   for (let i = 0; i < files.length; i++) {
     const d = files[i];
     try {
       if (!d?.email) throw new Error("missing email");
-      await kvSaveAcc(d); success++;
+      await kvSaveAcc(d);
+      success++;
+      // 每10条稍微yield一下，避免超时
+      if (i % 10 === 9) await new Promise(r => setTimeout(r, 10));
     } catch (e) {
       failed++;
       errors.push({ index: i, email: d?.email ?? "?", error: (e as Error).message });
@@ -416,8 +452,14 @@ async function handleApiDelete(req: Request): Promise<Response> {
 
 async function handleApiWipe(): Promise<Response> {
   const list = await kvListEmails();
-  for (const email of list) await kv.delete(["a", "d", email]);
+  // 串行删除每条记录
+  for (const email of list) {
+    await kv.delete(["a", "d", email]);
+  }
   await kv.set(["a", "list"], []);
+  // 清理统计
+  await kv.set(["stats", "calls"], 0);
+  await kv.set(["stats", "errors"], 0);
   return jsonResp({ ok: true, deleted: list.length });
 }
 
